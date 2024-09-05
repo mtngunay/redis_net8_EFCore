@@ -1,6 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using RedisApi.Data.Entity;
 using RedisApi.Data.Repository.Interface;
+using RedisApi.Services;
+using System.Diagnostics;
+using System.Xml.Linq;
 
 namespace RedisApi
 {
@@ -8,6 +12,7 @@ namespace RedisApi
     [Route("[controller]")]
     public class WeatherForecastController : ControllerBase
     {
+        private readonly CacheService _cacheService;
         private readonly IRepository<WeatherForecast> _repository;
 
         private static readonly string[] Summaries = new[]
@@ -15,17 +20,33 @@ namespace RedisApi
             "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
         };
 
-        public WeatherForecastController(IRepository<WeatherForecast> repository)
+        public WeatherForecastController(IRepository<WeatherForecast> repository, CacheService cacheService)
         {
             _repository = repository;
+            _cacheService = cacheService;
         }
 
 
         [HttpGet]
         public async Task<IActionResult> GetAll()
         {
-            var forecasts = await _repository.GetAllAsync();
-            return Ok(forecasts);
+            Stopwatch sw = new Stopwatch();
+            sw.Start();
+
+
+            var cacheKey = "WeatherForecast:All";
+            var cachedData = await _cacheService.GetAsync<List<WeatherForecast>>(cacheKey);
+
+            if (cachedData == null)
+            {
+                // Cache'te veri yok, veritabanýndan alýn
+                cachedData = await _repository.GetAllAsync();
+                await _cacheService.SetAsync(cacheKey, cachedData, TimeSpan.FromMinutes(10));
+            }
+
+            sw.Stop();
+            var s1 = sw.Elapsed.TotalMilliseconds;
+            return Ok(cachedData);
         }
 
         [HttpGet("{id}")]

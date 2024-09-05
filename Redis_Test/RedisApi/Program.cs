@@ -5,6 +5,7 @@ using RedisApi;
 using RedisApi.Data.Repository.Interface;
 using RedisApi.Data.Repository.Repositories;
 using StackExchange.Redis;
+using RedisApi.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -19,12 +20,22 @@ builder.Services.AddDbContext<AppDbContext>(options =>
                 options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"))
             );
 
+
+
+
+// IConnectionMultiplexer'ý DI konteynerine ekleyin
+builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+{
+    var configuration = ConfigurationOptions.Parse("localhost:6379", true);
+    return ConnectionMultiplexer.Connect(configuration);
+});
+
+// CacheService ve WeatherForecastRepository'yi DI konteynerine ekleyin
+builder.Services.AddSingleton<CacheService>();
 builder.Services.AddScoped<IRepository<WeatherForecast>, WeatherForecastRepository>();
 
-builder.Services.AddSingleton<ConnectionMultiplexer>(provider =>
-{
-    return ConnectionMultiplexer.Connect("localhost:6379,password=your_password,ssl=False,abortConnect=False");
-});
+// Diðer hizmetlerinizi eklemeye devam edin
+
 
 var app = builder.Build();
 

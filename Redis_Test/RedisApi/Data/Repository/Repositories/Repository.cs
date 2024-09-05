@@ -1,81 +1,158 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Internal;
 using RedisApi.Data.Repository.Interface;
 using StackExchange.Redis;
+using System.Text.Json;
 
 namespace RedisApi.Data.Repository.Repositories
 {
     public class Repository<T> : IRepository<T> where T : class
     {
-        private readonly AppDbContext _context; 
-        private readonly ConnectionMultiplexer _redis;
+        private readonly AppDbContext _context;
+        private readonly IDatabase _cache;
+        private readonly string _cacheKeyPrefix;
 
-        public Repository(AppDbContext context, ConnectionMultiplexer redis)
+        public Repository(AppDbContext context, IConnectionMultiplexer redis)
         {
             _context = context;
-            _redis = redis;
+            _cache = redis.GetDatabase();
+            _cacheKeyPrefix = typeof(T).Name + ":";
         }
 
         public async Task<List<T>> GetAllAsync()
         {
-            var entity = _context.Set<T>();
-            string tableName = entity.EntityType.ConstructorBinding.RuntimeType.Name;
-            string key = $"{tableName}";
+            string cacheKey = _cacheKeyPrefix + "All";
 
-            #region REDIS
+            try
+            {
+                // Redis cache'ten veri almayı deneyin
+                var cachedData = await _cache.StringGetAsync(cacheKey);
+                if (!cachedData.IsNullOrEmpty)
+                {
+                    return JsonSerializer.Deserialize<List<T>>(cachedData);
+                }
 
-            //Bunun için docker desktop kurmak gerekmektedir.
-            //var db = _redis.GetDatabase();
+                // Redis cache'te veri bulunamazsa, veritabanından veriyi çekin
+                var data = await _context.Set<T>().Take(5000).ToListAsync();
 
-            //var getRedis = await db.StringGetAsync(key);
+                // Veriyi Redis cache'ine ekleyin ve TTL ayarlayın
+                await _cache.StringSetAsync(cacheKey, JsonSerializer.Serialize(data), TimeSpan.FromMinutes(5));
 
-            //if (getRedis.IsNull)
-            //{
-            //    db.StringSetAsync(key, value);
-            //} 
-
-            //public async Task<string> GetValueAsync(string key)
-            //{
-            //    var db = _redis.GetDatabase();
-            //    return await db.StringGetAsync(key);
-            //}
-
-            //public async Task SetValueAsync(string key, string value)
-            //{
-            //    var db = _redis.GetDatabase();
-            //    await db.StringSetAsync(key, value);
-            //}
-
-            //public async Task<bool> DeleteKeyAsync(string key)
-            //{
-            //    var db = _redis.GetDatabase();
-            //    return await db.KeyDeleteAsync(key);
-            //}
-            #endregion
-
-
-            return await _context.Set<T>().ToListAsync();
+                return data;
+            }
+            catch (Exception ex)
+            {
+                // Hata yönetimi
+                Console.WriteLine($"Error retrieving data: {ex.Message}");
+                // Hata durumunda veritabanından veriyi döndürün
+                return await _context.Set<T>().Take(5000).ToListAsync();
+            }
         }
 
         public async Task<T> GetByIdAsync(int id)
         {
-            return await _context.Set<T>().FindAsync(id);
+            string cacheKey = _cacheKeyPrefix + id;
+
+            try
+            {
+                // Redis cache'ten veri almayı deneyin
+                var cachedData = await _cache.StringGetAsync(cacheKey);
+                if (!cachedData.IsNullOrEmpty)
+                {
+                    return JsonSerializer.Deserialize<T>(cachedData);
+                }
+
+                // Redis cache'te veri bulunamazsa, veritabanından veriyi çekin
+                var data = await _context.Set<T>().FindAsync(id);
+
+                // Veriyi Redis cache'ine ekleyin
+                if (data != null)
+                {
+                    await _cache.StringSetAsync(cacheKey, JsonSerializer.Serialize(data), TimeSpan.FromMinutes(5));
+                }
+
+                return data;
+            }
+            catch (Exception ex)
+            {
+                // Hata yönetimi
+                Console.WriteLine($"Error retrieving data by ID: {ex.Message}");
+                return null;
+            }
         }
 
         public async Task AddAsync(T entity)
         {
-            await _context.Set<T>().AddAsync(entity);
-            await _context.SaveChangesAsync();
+            try
+            {
+                _context.Set<T>().Add(entity);
+                await _context.SaveChangesAsync();
+
+                // Cache'i temizle
+                await InvalidateCacheAsync();
+            }
+            catch (Exception ex)
+            {
+                // Hata yönetimi
+                Console.WriteLine($"Error adding data: {ex.Message}");
+                throw;
+            }
         }
 
         public async Task UpdateAsync(T entity)
         {
-            _context.Set<T>().Update(entity);
-            await _context.SaveChangesAsync();
+            try
+            {
+                _context.Set<T>().Update(entity);
+                await _context.SaveChangesAsync();
+
+                // Cache'i temizle
+                await InvalidateCacheAsync();
+            }
+            catch (Exception ex)
+            {
+                // Hata yönetimi
+                Console.WriteLine($"Error updating data: {ex.Message}");
+                throw;
+            }
         }
+
         public async Task DeleteAsync(T entity)
         {
-            _context.Set<T>().Remove(entity);
-            await _context.SaveChangesAsync();
+            try
+            {
+                var keyProperty = typeof(T).GetProperty("Id"); // Id özelliğini almak için
+                var id = keyProperty?.GetValue(entity); // Id değerini almak için
+
+                if (id != null)
+                {
+                    _context.Set<T>().Remove(entity);
+                    await _context.SaveChangesAsync();
+
+                    // Silinen veriyi Redis cache'inden temizleyin
+                    await _cache.KeyDeleteAsync(_cacheKeyPrefix + id);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Hata yönetimi
+                Console.WriteLine($"Error deleting data: {ex.Message}");
+                throw;
+            }
+        }
+
+        private async Task InvalidateCacheAsync()
+        {
+            try
+            {
+                // Tüm cache'i temizle veya güncelle
+                await _cache.KeyDeleteAsync(_cacheKeyPrefix + "All");
+            }
+            catch (Exception ex)
+            {
+                // Hata yönetimi
+                Console.WriteLine($"Error invalidating cache: {ex.Message}");
+            }
         }
     }
 }
